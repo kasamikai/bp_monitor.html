@@ -1,0 +1,347 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>血壓心跳即時監測工具</title>
+    <!-- 載入 Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- 設定字體為 Inter，確保中文字體清晰 -->
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap');
+        body {
+            font-family: 'Inter', 'Noto Sans TC', sans-serif;
+            background-color: #f7f9fb;
+        }
+        .card {
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.06);
+            border-radius: 1rem;
+        }
+        input[type="number"], select {
+            border-radius: 0.5rem;
+            border: 1px solid #d1d5db;
+            padding: 0.5rem 1rem;
+            width: 100%;
+        }
+    </style>
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // 全域變數初始化
+        let db;
+        let auth;
+        let userId = 'loading'; // 預設狀態
+        const readingsRef = document.getElementById('readings-list');
+        const summaryCard = document.getElementById('summary-card');
+        const currentUserIdDisplay = document.getElementById('current-user-id');
+        const loadingSpinner = document.getElementById('loading-spinner');
+
+        // Firestore 路徑定義
+        const getCollectionPath = (uid) => {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            return `/artifacts/${appId}/users/${uid}/bp_readings`;
+        };
+
+        // Firebase 初始化與驗證
+        const initFirebase = async () => {
+            try {
+                // 檢查並使用全域變數
+                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
+                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                
+                if (Object.keys(firebaseConfig).length === 0) {
+                    console.error("Firebase Configuration is missing.");
+                    return;
+                }
+
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+                
+                // 設定 Firestore 日誌級別
+                setLogLevel('error');
+
+                // 嘗試使用自訂 Token 登入，如果沒有則匿名登入
+                if (initialAuthToken) {
+                    await signInWithCustomToken(auth, initialAuthToken);
+                } else {
+                    await signInAnonymously(auth);
+                }
+
+                // 設置身份驗證狀態監聽器
+                onAuthStateChanged(auth, (user) => {
+                    if (user) {
+                        userId = user.uid;
+                        currentUserIdDisplay.textContent = `使用者 ID: ${userId}`;
+                        // 開始監聽資料
+                        setupDataListener(userId);
+                        loadingSpinner.classList.add('hidden');
+                        document.getElementById('input-form').classList.remove('hidden');
+                    } else {
+                        userId = crypto.randomUUID();
+                        currentUserIdDisplay.textContent = `匿名 ID: ${userId}`;
+                        // 匿名登入或登出後，仍設定監聽器，但資料將儲存在匿名 ID 下
+                        setupDataListener(userId); 
+                        loadingSpinner.classList.add('hidden');
+                        document.getElementById('input-form').classList.remove('hidden');
+                    }
+                });
+
+            } catch (error) {
+                console.error("Firebase 初始化或驗證失敗:", error);
+                currentUserIdDisplay.textContent = "無法連接服務";
+                loadingSpinner.classList.add('hidden');
+            }
+        };
+
+        // 計算並渲染摘要結果
+        const renderSummary = (readings) => {
+            let totalSystolic = 0;
+            let totalDiastolic = 0;
+            let totalPulse = 0;
+            let count = readings.length;
+            
+            if (count === 0) {
+                summaryCard.innerHTML = `
+                    <p class="text-gray-500 text-center py-4">目前無紀錄，請開始監測。</p>
+                `;
+                return;
+            }
+
+            // 按時間點分組，只顯示當日數據，或者您可以選擇全部數據
+            // 這裡我們計算所有紀錄的總平均
+            readings.forEach(r => {
+                totalSystolic += r.systolic;
+                totalDiastolic += r.diastolic;
+                totalPulse += r.pulse;
+            });
+
+            const avgSystolic = (totalSystolic / count).toFixed(0);
+            const avgDiastolic = (totalDiastolic / count).toFixed(0);
+            const avgPulse = (totalPulse / count).toFixed(0);
+            
+            summaryCard.innerHTML = `
+                <div class="grid grid-cols-3 gap-4 text-center">
+                    <div>
+                        <p class="text-2xl font-bold text-blue-600">${avgSystolic}/${avgDiastolic}</p>
+                        <p class="text-sm text-gray-500">平均血壓 (收縮/舒張)</p>
+                    </div>
+                    <div>
+                        <p class="text-2xl font-bold text-green-600">${avgPulse}</p>
+                        <p class="text-sm text-gray-500">平均心跳 (次/分)</p>
+                    </div>
+                    <div>
+                        <p class="text-2xl font-bold text-yellow-600">${count}</p>
+                        <p class="text-sm text-gray-500">總紀錄筆數</p>
+                    </div>
+                </div>
+            `;
+        };
+
+        // 渲染讀數列表
+        const renderReadings = (readings) => {
+            readingsRef.innerHTML = ''; // 清空列表
+            
+            // 依時間戳記排序 (最近的在最上面)
+            const sortedReadings = readings.sort((a, b) => {
+                const timeA = a.timestamp?.seconds || 0;
+                const timeB = b.timestamp?.seconds || 0;
+                return timeB - timeA;
+            });
+
+            if (sortedReadings.length === 0) {
+                readingsRef.innerHTML = `<p class="text-gray-500 text-center py-4">尚無監測紀錄。</p>`;
+                return;
+            }
+
+            sortedReadings.forEach(reading => {
+                const li = document.createElement('li');
+                li.className = 'p-3 bg-white border-b border-gray-100 last:border-b-0 flex justify-between items-center rounded-lg my-2 card';
+
+                const timestamp = reading.timestamp?.toDate ? reading.timestamp.toDate() : new Date();
+                const timeString = timestamp.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+                const dateString = timestamp.toLocaleDateString('zh-TW', { year: 'numeric', month: 'numeric', day: 'numeric' });
+
+                li.innerHTML = `
+                    <div class="flex flex-col">
+                        <span class="font-semibold text-lg text-gray-800">${reading.timeSlot || '未知時段'} - ${timeString}</span>
+                        <span class="text-xs text-gray-400">${dateString}</span>
+                    </div>
+                    <div class="text-right">
+                        <p class="text-xl font-bold text-blue-700">${reading.systolic}/${reading.diastolic} mmHg</p>
+                        <p class="text-sm text-green-600">心跳: ${reading.pulse} 次/分</p>
+                    </div>
+                `;
+                readingsRef.appendChild(li);
+            });
+        };
+
+        // 監聽 Firestore 資料變化
+        const setupDataListener = (uid) => {
+            const path = getCollectionPath(uid);
+            const q = query(collection(db, path));
+            
+            // 實時監聽
+            onSnapshot(q, (snapshot) => {
+                const readings = [];
+                snapshot.forEach((doc) => {
+                    readings.push({ id: doc.id, ...doc.data() });
+                });
+                
+                // 渲染 UI
+                renderReadings(readings);
+                renderSummary(readings);
+
+            }, (error) => {
+                console.error("監聽 Firestore 資料失敗:", error);
+                readingsRef.innerHTML = `<p class="text-red-500 text-center py-4">資料載入失敗，請檢查連線。</p>`;
+            });
+        };
+
+        // 儲存新的讀數
+        const saveReading = async (event) => {
+            event.preventDefault();
+            
+            const form = event.target;
+            const timeSlot = form.timeSlot.value;
+            const systolic = parseInt(form.systolic.value);
+            const diastolic = parseInt(form.diastolic.value);
+            const pulse = parseInt(form.pulse.value);
+            
+            // 基本驗證
+            if (!timeSlot || isNaN(systolic) || isNaN(diastolic) || isNaN(pulse)) {
+                alert("請確保所有欄位都已填寫正確的數值。");
+                return;
+            }
+
+            if (systolic < 50 || diastolic < 30 || pulse < 30 || systolic > 300) {
+                 alert("請檢查您輸入的數值是否合理 (例如：收縮壓 50-300)。");
+                 return;
+            }
+
+            try {
+                const path = getCollectionPath(userId);
+                await addDoc(collection(db, path), {
+                    timestamp: serverTimestamp(),
+                    timeSlot: timeSlot,
+                    systolic: systolic,
+                    diastolic: diastolic,
+                    pulse: pulse,
+                    userId: userId 
+                });
+                
+                // 清空數值欄位，以便下次輸入
+                form.systolic.value = '';
+                form.diastolic.value = '';
+                form.pulse.value = '';
+
+                // 可選：給予成功提示
+                document.getElementById('success-message').classList.remove('opacity-0');
+                setTimeout(() => {
+                    document.getElementById('success-message').classList.add('opacity-0');
+                }, 1500);
+
+            } catch (error) {
+                console.error("儲存資料失敗:", error);
+                alert("儲存資料失敗，請稍後再試。");
+            }
+        };
+
+        // 設定表單提交事件
+        window.onload = function() {
+            initFirebase();
+            document.getElementById('input-form').addEventListener('submit', saveReading);
+
+            // 設定預設時段
+            const now = new Date();
+            const hour = now.getHours();
+            let defaultSlot = '睡前';
+            if (hour >= 5 && hour < 10) {
+                defaultSlot = '清晨';
+            } else if (hour >= 17 && hour < 20) {
+                defaultSlot = '傍晚';
+            }
+            document.getElementById('time-slot-select').value = defaultSlot;
+        }
+
+    </script>
+</head>
+<body class="p-4 sm:p-6 min-h-screen">
+    <div class="max-w-xl mx-auto">
+        <h1 class="text-3xl font-extrabold text-gray-800 mb-2">🩸 健康監測日誌</h1>
+        <p id="current-user-id" class="text-sm text-gray-500 mb-4">正在載入使用者 ID...</p>
+        
+        <!-- 載入指示器 -->
+        <div id="loading-spinner" class="text-center py-10">
+            <svg class="animate-spin -ml-1 mr-3 h-8 w-8 text-blue-600 mx-auto" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            <p class="text-blue-600 mt-2">連線至資料庫...</p>
+        </div>
+
+        <!-- 數據輸入區塊 -->
+        <div id="input-form" class="card bg-white p-6 mb-6 hidden">
+            <h2 class="text-xl font-bold mb-4 text-gray-700">新增監測紀錄</h2>
+            <form id="input-form">
+                
+                <!-- 時段選擇 -->
+                <div class="mb-4">
+                    <label for="time-slot-select" class="block text-sm font-medium text-gray-700 mb-1">選擇時段 (依建議時間點)</label>
+                    <select id="time-slot-select" name="timeSlot" required class="focus:ring-blue-500 focus:border-blue-500">
+                        <option value="">-- 請選擇時段 --</option>
+                        <option value="清晨">清晨 (起床後 1 小時內)</option>
+                        <option value="傍晚">傍晚 (晚上 6-8 點)</option>
+                        <option value="睡前">睡前 (準備就寢前 1 小時)</option>
+                        <option value="服藥後">服藥後 (服藥後約 1 小時)</option>
+                    </select>
+                </div>
+
+                <!-- 數值輸入 -->
+                <div class="grid grid-cols-3 gap-3 mb-6">
+                    <div>
+                        <label for="systolic" class="block text-sm font-medium text-gray-700 mb-1">收縮壓 (高壓)</label>
+                        <input type="number" id="systolic" name="systolic" required min="50" max="300" placeholder="mmHg" class="focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    <div>
+                        <label for="diastolic" class="block text-sm font-medium text-gray-700 mb-1">舒張壓 (低壓)</label>
+                        <input type="number" id="diastolic" name="diastolic" required min="30" max="200" placeholder="mmHg" class="focus:ring-blue-500 focus:border-blue-500">
+                    </div>
+                    <div>
+                        <label for="pulse" class="block text-sm font-medium text-gray-700 mb-1">心跳 (脈搏)</label>
+                        <input type="number" id="pulse" name="pulse" required min="30" max="200" placeholder="次/分" class="focus:ring-green-500 focus:border-green-500">
+                    </div>
+                </div>
+
+                <div class="relative">
+                    <button type="submit" class="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-xl transition duration-150 shadow-lg">
+                        儲存紀錄
+                    </button>
+                    <!-- 成功訊息 -->
+                    <div id="success-message" class="absolute inset-0 flex items-center justify-center bg-green-500 text-white rounded-xl text-lg font-bold transition-opacity duration-300 opacity-0 pointer-events-none">
+                        儲存成功!
+                    </div>
+                </div>
+            </form>
+        </div>
+
+        <!-- 數據摘要區塊 -->
+        <h2 class="text-xl font-bold mb-3 text-gray-700">數據摘要 (所有紀錄平均)</h2>
+        <div id="summary-card" class="card bg-white p-6 mb-6 text-center">
+            <p class="text-gray-500 py-4">正在計算平均值...</p>
+        </div>
+
+        <!-- 歷史紀錄區塊 -->
+        <h2 class="text-xl font-bold mb-3 text-gray-700">歷史監測紀錄 (最新)</h2>
+        <ul id="readings-list" class="space-y-3">
+            <li class="text-gray-500 text-center py-4">正在載入紀錄...</li>
+        </ul>
+    </div>
+</body>
+</html>
+
+
