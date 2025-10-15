@@ -26,15 +26,33 @@
     </style>
     <!-- Firebase SDKs -->
     <script type="module">
+        // 匯入 Firebase 核心功能
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        // 匯入身份驗證與資料庫功能
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, addDoc, query, onSnapshot, serverTimestamp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { setLogLevel } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // === 您的 Firebase 配置資訊 (已手動嵌入) ===
+        const firebaseConfig = {
+          apiKey: "AIzaSyDkmssdHbWWgu7NuDGNdaDAy7CH5ZjMK3I",
+          authDomain: "bpmonitor-389f1.firebaseapp.com",
+          projectId: "bpmonitor-389f1",
+          storageBucket: "bpmonitor-389f1.firebasestorage.app",
+          messagingSenderId: "1085024264595",
+          appId: "1:1085024264595:web:68a1be596b0684543c8866",
+          measurementId: "G-62HY3BBWHD"
+        };
+        // 由於是在獨立環境運行，不使用 Canvas 提供的 Token
+        const initialAuthToken = null; 
+        // 專案 ID 用於資料庫路徑
+        const appId = "bpmonitor-389f1"; 
+        // ===========================================
 
         // 全域變數初始化
         let db;
         let auth;
-        let userId = 'loading'; // 預設狀態
+        let userId = 'loading';
         const readingsRef = document.getElementById('readings-list');
         const summaryCard = document.getElementById('summary-card');
         const currentUserIdDisplay = document.getElementById('current-user-id');
@@ -42,19 +60,17 @@
 
         // Firestore 路徑定義
         const getCollectionPath = (uid) => {
-            const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+            // 使用您的專案 ID 作為 app id
             return `/artifacts/${appId}/users/${uid}/bp_readings`;
         };
 
         // Firebase 初始化與驗證
         const initFirebase = async () => {
             try {
-                // 檢查並使用全域變數
-                const firebaseConfig = JSON.parse(typeof __firebase_config !== 'undefined' ? __firebase_config : '{}');
-                const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
-                
-                if (Object.keys(firebaseConfig).length === 0) {
-                    console.error("Firebase Configuration is missing.");
+                if (Object.keys(firebaseConfig).length === 0 || !firebaseConfig.apiKey) {
+                    console.error("Firebase Configuration is missing or incomplete.");
+                    currentUserIdDisplay.textContent = "錯誤：配置資訊遺失。";
+                    loadingSpinner.classList.add('hidden');
                     return;
                 }
 
@@ -62,38 +78,31 @@
                 db = getFirestore(app);
                 auth = getAuth(app);
                 
-                // 設定 Firestore 日誌級別
-                setLogLevel('error');
+                setLogLevel('error'); // 僅顯示錯誤
 
-                // 嘗試使用自訂 Token 登入，如果沒有則匿名登入
-                if (initialAuthToken) {
-                    await signInWithCustomToken(auth, initialAuthToken);
-                } else {
-                    await signInAnonymously(auth);
-                }
+                // 嘗試匿名登入 (因為沒有提供 custom token)
+                await signInAnonymously(auth);
 
                 // 設置身份驗證狀態監聽器
                 onAuthStateChanged(auth, (user) => {
                     if (user) {
                         userId = user.uid;
-                        currentUserIdDisplay.textContent = `使用者 ID: ${userId}`;
+                        // 顯示完整的用戶 ID，幫助管理
+                        currentUserIdDisplay.textContent = `您的資料 ID (UID): ${userId}`; 
                         // 開始監聽資料
                         setupDataListener(userId);
                         loadingSpinner.classList.add('hidden');
                         document.getElementById('input-form').classList.remove('hidden');
                     } else {
-                        userId = crypto.randomUUID();
-                        currentUserIdDisplay.textContent = `匿名 ID: ${userId}`;
-                        // 匿名登入或登出後，仍設定監聽器，但資料將儲存在匿名 ID 下
-                        setupDataListener(userId); 
+                        // 理論上匿名登入不會失敗，但如果失敗，則顯示錯誤
+                        currentUserIdDisplay.textContent = "無法登入服務，請檢查 Firebase 匿名登入是否啟用。";
                         loadingSpinner.classList.add('hidden');
-                        document.getElementById('input-form').classList.remove('hidden');
                     }
                 });
 
             } catch (error) {
                 console.error("Firebase 初始化或驗證失敗:", error);
-                currentUserIdDisplay.textContent = "無法連接服務";
+                currentUserIdDisplay.textContent = "無法連接服務，請檢查網路與 Firebase 配置。";
                 loadingSpinner.classList.add('hidden');
             }
         };
@@ -112,8 +121,6 @@
                 return;
             }
 
-            // 按時間點分組，只顯示當日數據，或者您可以選擇全部數據
-            // 這裡我們計算所有紀錄的總平均
             readings.forEach(r => {
                 totalSystolic += r.systolic;
                 totalDiastolic += r.diastolic;
@@ -124,10 +131,19 @@
             const avgDiastolic = (totalDiastolic / count).toFixed(0);
             const avgPulse = (totalPulse / count).toFixed(0);
             
+            // 根據平均血壓值給予顏色提示
+            let bpColor = 'text-blue-600';
+            if (avgSystolic >= 140 || avgDiastolic >= 90) {
+                bpColor = 'text-red-600'; // 進入二期高血壓範圍
+            } else if (avgSystolic >= 130 || avgDiastolic >= 80) {
+                 bpColor = 'text-orange-500'; // 進入高血壓前期/一期高血壓範圍
+            }
+
+
             summaryCard.innerHTML = `
                 <div class="grid grid-cols-3 gap-4 text-center">
                     <div>
-                        <p class="text-2xl font-bold text-blue-600">${avgSystolic}/${avgDiastolic}</p>
+                        <p class="text-2xl font-bold ${bpColor}">${avgSystolic}/${avgDiastolic}</p>
                         <p class="text-sm text-gray-500">平均血壓 (收縮/舒張)</p>
                     </div>
                     <div>
@@ -160,7 +176,15 @@
 
             sortedReadings.forEach(reading => {
                 const li = document.createElement('li');
-                li.className = 'p-3 bg-white border-b border-gray-100 last:border-b-0 flex justify-between items-center rounded-lg my-2 card';
+                // 根據血壓值判斷邊框顏色
+                let borderColor = 'border-blue-300';
+                if (reading.systolic >= 140 || reading.diastolic >= 90) {
+                    borderColor = 'border-red-500';
+                } else if (reading.systolic >= 130 || reading.diastolic >= 80) {
+                    borderColor = 'border-orange-400';
+                }
+
+                li.className = `p-3 bg-white border-l-4 ${borderColor} last:border-b-0 flex justify-between items-center rounded-lg my-2 card`;
 
                 const timestamp = reading.timestamp?.toDate ? reading.timestamp.toDate() : new Date();
                 const timeString = timestamp.toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
@@ -247,7 +271,7 @@
 
             } catch (error) {
                 console.error("儲存資料失敗:", error);
-                alert("儲存資料失敗，請稍後再試。");
+                alert("儲存資料失敗，請檢查 Firebase 規則。");
             }
         };
 
@@ -264,6 +288,8 @@
                 defaultSlot = '清晨';
             } else if (hour >= 17 && hour < 20) {
                 defaultSlot = '傍晚';
+            } else if (hour >= 11 && hour < 14) {
+                 defaultSlot = '服藥後'; // 假設中午服藥
             }
             document.getElementById('time-slot-select').value = defaultSlot;
         }
@@ -343,5 +369,3 @@
     </div>
 </body>
 </html>
-
-
